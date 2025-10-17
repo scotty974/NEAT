@@ -26,7 +26,8 @@ def run_episode(genome, env, max_steps=100, render=False, verbose=False):
     goal_position = MAP_SIZE * MAP_SIZE - 1  # 15 pour 4x4
     
     reached_goal = False
-    impossible_actions = 0
+    min_distance_to_goal = MAP_SIZE * 2  # Distance maximale possible
+    total_distance_progress = 0
     
     if verbose:
         print(f"\n{'='*50}")
@@ -35,6 +36,10 @@ def run_episode(genome, env, max_steps=100, render=False, verbose=False):
         print(f"{'='*50}")
     
     while not done and steps < max_steps:
+        # Calculer distance actuelle au goal
+        current_distance = manhattan_distance(observation, goal_position)
+        min_distance_to_goal = min(min_distance_to_goal, current_distance)
+        
         # Convertir l'observation en one-hot encoding
         state_input = np.zeros(MAP_SIZE * MAP_SIZE)
         state_input[observation] = 1.0
@@ -47,6 +52,7 @@ def run_episode(genome, env, max_steps=100, render=False, verbose=False):
                 if verbose:
                     print(f"\nStep {steps + 1}:")
                     print(f"  Position: {observation} (row {observation//MAP_SIZE}, col {observation%MAP_SIZE})")
+                    print(f"  Distance to goal: {current_distance}")
                     print(f"  NN outputs: [{', '.join([f'{o:.3f}' for o in output[:4]])}]")
                     print(f"  Action: {action} ({action_names[action]})")
             else:
@@ -58,15 +64,15 @@ def run_episode(genome, env, max_steps=100, render=False, verbose=False):
         
         # Exécuter l'action
         old_observation = observation
+        old_distance = current_distance
         observation, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         steps += 1
         
-        # Détecter action impossible (pas de mouvement)
-        if old_observation == observation and not done:
-            impossible_actions += 1
-            if verbose:
-                print(f"  ⚠️ Impossible action! (tried to move outside map)")
+        # Calculer le progrès vers le goal
+        new_distance = manhattan_distance(observation, goal_position)
+        distance_progress = old_distance - new_distance  # Positif si on se rapproche
+        total_distance_progress += distance_progress
         
         # Détecter si on a atteint le goal
         if reward > 0:
@@ -74,6 +80,7 @@ def run_episode(genome, env, max_steps=100, render=False, verbose=False):
         
         if verbose:
             print(f"  New position: {observation} (row {observation//MAP_SIZE}, col {observation%MAP_SIZE})")
+            print(f"  Distance progress: {distance_progress:+d} (now at {new_distance})")
             if reward > 0:
                 print(f"  🎉 GOAL REACHED!")
             elif done:
@@ -87,70 +94,90 @@ def run_episode(genome, env, max_steps=100, render=False, verbose=False):
         print(f"\n{'='*50}")
         print(f"Episode finished: {'SUCCESS ✓' if reached_goal else 'FAILED ✗'}")
         print(f"Total steps: {steps}")
-        print(f"Impossible actions: {impossible_actions}")
+        print(f"Min distance reached: {min_distance_to_goal}")
+        print(f"Total progress: {total_distance_progress:+d}")
         print(f"{'='*50}\n")
     
-    return reached_goal, steps, impossible_actions
+    return reached_goal, steps, min_distance_to_goal, total_distance_progress
 
-def calculate_fitness(reached_goal, steps, impossible_actions, optimal_steps=6):
+def calculate_fitness(reached_goal, steps, min_distance_to_goal, total_distance_progress, 
+                     optimal_steps=6, max_distance=6):
     """
-    Calcule la fitness sur 100 points.
+    Calcule la fitness sur 100 points, adaptée pour environnement stochastique.
     
     Args:
         reached_goal: True si le goal a été atteint
         steps: Nombre de pas effectués
-        impossible_actions: Nombre d'actions impossibles tentées
-        optimal_steps: Nombre optimal de pas pour résoudre (6 pour 4x4)
+        min_distance_to_goal: Distance minimale atteinte du goal
+        total_distance_progress: Progrès cumulé vers le goal
+        optimal_steps: Nombre optimal de pas (6 pour 4x4)
+        max_distance: Distance maximale possible (6 pour 4x4)
     
     Returns:
         fitness: Score entre 0 et 100
     """
-    if not reached_goal:
-        # Si échec: score faible avec pénalité pour actions impossibles
-        fitness = max(0, 10 - (impossible_actions * 2))
-        return fitness
-    
-    # Si succès: score de base de 50 points
-    fitness = 50
-    
-    # Bonus pour chemin court (max 40 points)
-    # Plus on est proche de l'optimal, plus le bonus est élevé
-    if steps <= optimal_steps:
-        # Chemin optimal ou mieux: bonus complet
-        path_bonus = 40
-    else:
-        # Bonus décroissant en fonction de l'écart avec l'optimal
-        # On tolère jusqu'à 3x l'optimal avant d'avoir 0 bonus
-        max_acceptable_steps = optimal_steps * 3
-        if steps <= max_acceptable_steps:
-            path_bonus = 40 * (1 - (steps - optimal_steps) / (max_acceptable_steps - optimal_steps))
+    if reached_goal:
+        # SUCCÈS: Base de 60 points
+        fitness = 60
+        
+        # Bonus pour chemin court (max 35 points)
+        if steps <= optimal_steps:
+            path_bonus = 35
         else:
-            path_bonus = 0
-    
-    fitness += path_bonus
-    
-    # Pénalité pour actions impossibles (max -10 points)
-    impossible_penalty = min(10, impossible_actions * 2)
-    fitness -= impossible_penalty
+            max_acceptable_steps = optimal_steps * 3
+            if steps <= max_acceptable_steps:
+                path_bonus = 35 * (1 - (steps - optimal_steps) / (max_acceptable_steps - optimal_steps))
+            else:
+                path_bonus = 0
+        
+        fitness += path_bonus
+        
+        # Bonus pour efficacité (max 5 points)
+        # Récompense si peu d'étapes gaspillées
+        efficiency = max(0, 1 - (steps - optimal_steps) / (max_acceptable_steps))
+        fitness += efficiency * 5
+        
+    else:
+        # ÉCHEC: Base de 0, mais récompenses pour progression
+        fitness = 0
+        
+        # Récompense pour s'être approché du goal (max 40 points)
+        # Plus on est proche, plus on gagne de points
+        distance_score = (1 - min_distance_to_goal / max_distance) * 40
+        fitness += distance_score
+        
+        # Bonus pour progression générale vers le goal (max 20 points)
+        # Récompense le mouvement net vers le goal
+        max_possible_progress = max_distance * 2  # Estimation généreuse
+        progress_score = max(0, min(20, (total_distance_progress / max_possible_progress) * 20))
+        fitness += progress_score
+        
+        # Petit bonus pour avoir survécu longtemps (max 10 points)
+        survival_bonus = min(10, (steps / 100) * 10)
+        fitness += survival_bonus
     
     # S'assurer que la fitness reste entre 0 et 100
     fitness = max(0, min(100, fitness))
     
     return fitness
 
-def eval_genome(genome, num_episodes=50):
+def eval_genome(genome, num_episodes=100, verbose=False):
     """Évalue un genome sur plusieurs épisodes."""
     env = gym.make('FrozenLake-v1', is_slippery=True)
     
     episode_fitnesses = []
+    successes = 0
     
-    for _ in range(num_episodes):
+    for ep in range(num_episodes):
         try:
-            reached_goal, steps, impossible_actions = run_episode(genome, env)
-            fitness = calculate_fitness(reached_goal, steps, impossible_actions)
+            reached_goal, steps, min_dist, progress = run_episode(genome, env)
+            fitness = calculate_fitness(reached_goal, steps, min_dist, progress)
             episode_fitnesses.append(fitness)
+            if reached_goal:
+                successes += 1
         except Exception as e:
-            # En cas d'erreur, fitness de 0
+            if verbose:
+                print(f"Error in episode {ep}: {e}")
             episode_fitnesses.append(0)
     
     env.close()
@@ -158,16 +185,17 @@ def eval_genome(genome, num_episodes=50):
     # Fitness moyenne sur tous les épisodes
     avg_fitness = sum(episode_fitnesses) / len(episode_fitnesses)
     
-    return avg_fitness
+    # Bonus pour taux de succès (pour favoriser la consistance)
+    success_rate = successes / num_episodes
+    consistency_bonus = success_rate * 10  # Max 10 points
+    
+    final_fitness = min(100, avg_fitness + consistency_bonus)
+    
+    return final_fitness
 
 def watch_genome_play(genome_path='best_genome_frozenlake.pkl', num_episodes=5, render_mode='human'):
     """
     Charge et visualise un genome sauvegardé en train de jouer.
-    
-    Args:
-        genome_path: Chemin vers le fichier pickle du genome
-        num_episodes: Nombre d'épisodes à visualiser
-        render_mode: 'human' pour affichage graphique, 'ansi' pour affichage texte
     """
     print(f"\n{'='*70}")
     print(f"{'WATCHING GENOME PLAY':^70}")
@@ -194,32 +222,32 @@ def watch_genome_play(genome_path='best_genome_frozenlake.pkl', num_episodes=5, 
         print(f"EPISODE {ep + 1}/{num_episodes}")
         print(f"{'─'*70}")
         
-        reached_goal, steps, impossible_actions = run_episode(genome, env, render=True, verbose=True)
-        fitness = calculate_fitness(reached_goal, steps, impossible_actions)
+        reached_goal, steps, min_dist, progress = run_episode(genome, env, render=True, verbose=True)
+        fitness = calculate_fitness(reached_goal, steps, min_dist, progress)
         
         if reached_goal:
             successes += 1
             print(f"✓ Episode {ep + 1}: SUCCESS in {steps} steps! (Fitness: {fitness:.1f}/100)")
         else:
-            print(f"✗ Episode {ep + 1}: Failed after {steps} steps (Fitness: {fitness:.1f}/100)")
+            print(f"✗ Episode {ep + 1}: Failed after {steps} steps (Min dist: {min_dist}, Fitness: {fitness:.1f}/100)")
         
         total_steps_list.append(steps)
         
         if ep < num_episodes - 1:
             import time
-            time.sleep(1)  # Pause entre les épisodes
+            time.sleep(1)
     
     env.close()
     
-    # Statistiques finales
     print(f"\n{'='*70}")
     print(f"{'FINAL STATISTICS':^70}")
     print(f"{'='*70}")
     print(f"Success Rate: {successes}/{num_episodes} ({100*successes/num_episodes:.1f}%)")
     print(f"Average Steps: {sum(total_steps_list)/len(total_steps_list):.1f}")
     if successes > 0:
-        successful_steps = [s for i, s in enumerate(total_steps_list) if i < len(total_steps_list)]
-        print(f"Steps range: {min(total_steps_list)} - {max(total_steps_list)}")
+        successful_steps = [total_steps_list[i] for i in range(len(total_steps_list)) if i < successes]
+        if successful_steps:
+            print(f"Steps range (successes): {min(successful_steps)} - {max(successful_steps)}")
     print(f"{'='*70}\n")
 
 if __name__ == '__main__':
@@ -228,13 +256,11 @@ if __name__ == '__main__':
     # Mode de lancement
     if len(sys.argv) > 1:
         if sys.argv[1] == 'watch':
-            # Mode visualisation
             num_eps = int(sys.argv[2]) if len(sys.argv) > 2 else 5
             genome_file = sys.argv[3] if len(sys.argv) > 3 else 'best_genome_frozenlake.pkl'
             watch_genome_play(genome_file, num_eps)
             sys.exit(0)
         elif sys.argv[1] == 'test':
-            # Mode test rapide (sans affichage graphique)
             genome_file = sys.argv[2] if len(sys.argv) > 2 else 'best_genome_frozenlake.pkl'
             
             print("\nLoading genome for quick test...")
@@ -244,28 +270,28 @@ if __name__ == '__main__':
             env = gym.make('FrozenLake-v1', is_slippery=True)
             successes = 0
             total_fitness = 0
-            for i in range(100):
-                reached_goal, steps, impossible_actions = run_episode(genome, env)
-                fitness = calculate_fitness(reached_goal, steps, impossible_actions)
+            for i in range(200):
+                reached_goal, steps, min_dist, progress = run_episode(genome, env)
+                fitness = calculate_fitness(reached_goal, steps, min_dist, progress)
                 total_fitness += fitness
                 if reached_goal:
                     successes += 1
             env.close()
             
-            avg_fitness = total_fitness / 100
-            print(f"Test on 100 episodes:")
-            print(f"  Success rate: {successes}/100 ({100*successes/100:.1f}%)")
+            avg_fitness = total_fitness / 200
+            print(f"Test on 200 episodes:")
+            print(f"  Success rate: {successes}/200 ({100*successes/200:.1f}%)")
             print(f"  Average fitness: {avg_fitness:.1f}/100")
             sys.exit(0)
     
-    # Mode entraînement (par défaut)
-    generations = 200
-    pop_size = 150
-    target_fitness = 80  # Sur 100
+    # Mode entraînement
+    generations = 300
+    pop_size = 50
+    target_fitness = 75  # Sur 100 (réduit car environnement stochastique)
     speciator_threshold = 1.0
     save_best = True
-    NUM_INPUTS = 16  # 16 états possibles (4x4 grid) en one-hot
-    NUM_OUTPUTS = 4  # 4 actions (gauche, bas, droite, haut)
+    NUM_INPUTS = 16
+    NUM_OUTPUTS = 4
     
     innov = InovationsTracker()
     speciator = Speciator(speciator_threshold)
@@ -276,15 +302,15 @@ if __name__ == '__main__':
     species_count_history = []
     
     print("=" * 100)
-    print(f"{'NEAT - FrozenLake Problem (From Scratch)':^100}")
+    print(f"{'NEAT - FrozenLake Problem (Stochastic Environment)':^100}")
     print("=" * 100)
-    print(f"Population: {pop_size} | Target: {target_fitness}/100 | Speciation Threshold: {speciator_threshold}")
-    print(f"Inputs: {NUM_INPUTS} (one-hot encoded states) | Outputs: {NUM_OUTPUTS} (actions)")
-    print("\nFitness System (out of 100):")
-    print("  - Success: 50 base points")
-    print("  - Short path bonus: up to 40 points (optimal = 6 steps)")
-    print("  - Impossible actions: -2 points each")
-    print("  - Failure: max 10 points (with penalties)")
+    print(f"Population: {pop_size} | Target: {target_fitness}/100 | Speciation: {speciator_threshold}")
+    print(f"Environment: SLIPPERY (stochastic) - 33% direction, 66% random slide")
+    print(f"Inputs: {NUM_INPUTS} (one-hot) | Outputs: {NUM_OUTPUTS} (actions)")
+    print("\nFitness System (0-100, stochastic-aware):")
+    print("  SUCCESS: 60 base + 35 path efficiency + 5 consistency = up to 100")
+    print("  FAILURE: 0 base + 40 proximity + 20 progress + 10 survival = up to 70")
+    print("  + Consistency bonus: up to 10 points based on success rate")
     print("=" * 100)
     
     stagnation_counter = 0
@@ -299,7 +325,8 @@ if __name__ == '__main__':
             if i % 30 == 0:
                 print(".", end="", flush=True)
             
-            score = eval_genome(genome, num_episodes=50)
+            # Plus d'épisodes pour gérer la stochasticité
+            score = eval_genome(genome, num_episodes=100)
             fitness_score.append(score)
         
         print(" Done!")
@@ -313,10 +340,15 @@ if __name__ == '__main__':
         num_species = len(species_list)
         species_count_history.append(num_species)
         
-        # Détection de stagnation
         if best_fitness > best_ever:
             best_ever = best_fitness
             stagnation_counter = 0
+            
+            # Sauvegarder le meilleur
+            best_idx = fitness_score.index(best_fitness)
+            best_genome = population[best_idx]
+            with open("best_genome_frozenlake.pkl", "wb") as f:
+                pickle.dump(best_genome, f)
         else:
             stagnation_counter += 1
         
@@ -331,61 +363,55 @@ if __name__ == '__main__':
             best_idx = fitness_score.index(best_fitness)
             best_genome = population[best_idx]
             
-            print(f"\nTesting best genome (visual test on 5 episodes):")
-            env = gym.make('FrozenLake-v1', is_slippery=True)
+            print(f"\nTesting best genome (10 episodes):")
+            env = gym.make('FrozenLake-v1', is_slippery=True, render_mode=None)
+            test_successes = 0
             test_fitnesses = []
             test_details = []
-            for ep in range(5):
-                reached_goal, steps, impossible_actions = run_episode(best_genome, env)
-                fitness = calculate_fitness(reached_goal, steps, impossible_actions)
+            
+            for ep in range(10):
+                reached_goal, steps, min_dist, progress = run_episode(best_genome, env)
+                fitness = calculate_fitness(reached_goal, steps, min_dist, progress)
                 test_fitnesses.append(fitness)
-                test_details.append((reached_goal, steps, impossible_actions))
+                test_details.append((reached_goal, steps, min_dist))
                 
-                result = "✓ SUCCESS" if reached_goal else "✗ Failed"
-                print(f"  Ep {ep+1}: {result} | Steps: {steps:2d} | Impossible: {impossible_actions} | Fitness: {fitness:.1f}/100")
+                if reached_goal:
+                    test_successes += 1
+                    result = f"✓ SUCCESS in {steps:2d} steps"
+                else:
+                    result = f"✗ Failed (min dist: {min_dist})"
+                
+                if ep < 5:  # Afficher seulement les 5 premiers
+                    print(f"  Ep {ep+1}: {result} | Fitness: {fitness:.1f}")
             
             env.close()
             avg_test_fitness = sum(test_fitnesses) / len(test_fitnesses)
-            successes = sum(1 for r, _, _ in test_details if r)
-            print(f"  Average fitness: {avg_test_fitness:.1f}/100 | Success rate: {successes}/5")
+            print(f"  Success rate: {test_successes}/10 ({test_successes*10}%)")
+            print(f"  Average fitness: {avg_test_fitness:.1f}/100")
             
             print(f"\nSpecies breakdown:")
             for i, species in enumerate(species_list, 1):
                 members_count = len(species.members)
-                try:
-                    # Récupérer les fitness des membres de cette espèce
-                    species_fitnesses = []
-                    for member in species.members:
-                        try:
-                            idx = population.index(member)
-                            species_fitnesses.append(fitness_score[idx])
-                        except (ValueError, IndexError) as e:
-                            # Le membre n'est pas dans la population (ne devrait pas arriver)
-                            continue
-                    
-                    if species_fitnesses:
-                        species_avg = sum(species_fitnesses) / len(species_fitnesses)
-                        species_best = max(species_fitnesses)
-                    else:
-                        species_avg = 0
-                        species_best = 0
-                    
+                species_fitnesses = []
+                for member in species.members:
+                    try:
+                        idx = population.index(member)
+                        species_fitnesses.append(fitness_score[idx])
+                    except (ValueError, IndexError):
+                        continue
+                
+                if species_fitnesses:
+                    species_avg = sum(species_fitnesses) / len(species_fitnesses)
+                    species_best = max(species_fitnesses)
                     bar_length = int(members_count / pop_size * 30)
                     bar = "█" * bar_length + "░" * (30 - bar_length)
-                    
-                    print(f"  S{i:02} | {bar} | N={members_count:3d} ({members_count/pop_size*100:5.1f}%) | "
-                          f"Avg: {species_avg:.1f} | Best: {species_best:.1f}")
-                except Exception as e:
-                    # Afficher l'erreur pour débugger
-                    print(f"  S{i:02} | Error calculating stats: {e}")
-                    print(f"         Members: {members_count}, Population size: {len(population)}")
+                    print(f"  S{i:02} | {bar} | N={members_count:3d} | Avg: {species_avg:.1f} | Best: {species_best:.1f}")
             
-            # Warning si une seule espèce
             if num_species == 1:
-                print(f"\n⚠️  WARNING: Only 1 species! Diversity lost.")
+                print(f"\n⚠️  WARNING: Only 1 species! Consider lowering speciation threshold.")
         else:
-            print(f"Gen {gen:04} | Best: {best_fitness:.1f}/100 | Avg: {avg_fitness:.1f}/100 | "
-                  f"Species: {num_species:2d} | Stagnation: {stagnation_counter:3d}", end="")
+            print(f"Gen {gen:04} | Best: {best_fitness:.1f} | Avg: {avg_fitness:.1f} | "
+                  f"Species: {num_species:2d} | Stag: {stagnation_counter:3d}", end="")
             if num_species == 1:
                 print(" ⚠️", end="")
             print()
@@ -394,18 +420,8 @@ if __name__ == '__main__':
             print(f"\n{'=' * 100}")
             print(f"{'🎉 TARGET REACHED! 🎉':^100}")
             print(f"{'=' * 100}")
-            print(f"Solution found in generation {gen}")
-            print(f"Best fitness: {best_fitness:.1f}/100")
-            
-            best_genome = population[fitness_score.index(best_fitness)]
-            
-            if save_best:
-                with open("best_genome_frozenlake.pkl", "wb") as f:
-                    pickle.dump(best_genome, f)
-                print("\n✓ Best genome saved to 'best_genome_frozenlake.pkl'")
             break
         
-        # Warning si stagnation prolongée
         if stagnation_counter > 50 and stagnation_counter % 25 == 0:
             print(f"\n⚠️  STAGNATION: No improvement for {stagnation_counter} generations")
         
@@ -414,58 +430,34 @@ if __name__ == '__main__':
     print(f"\n{'=' * 100}")
     print(f"{'TRAINING COMPLETE':^100}")
     print(f"{'=' * 100}")
-    print(f"Final Best Fitness: {best_fitness:.1f}/100")
-    print(f"Final Avg Fitness: {avg_fitness:.1f}/100")
-    print(f"Target Fitness: {target_fitness}/100")
+    print(f"Final Best: {best_fitness:.1f}/100 | Target: {target_fitness}/100")
+    print(f"Best Ever: {best_ever:.1f}/100")
     print(f"Generations: {gen + 1} / {generations}")
     print(f"Final Species: {len(speciator.get_species())}")
-    print(f"Max Species Seen: {max(species_count_history)}")
-    print(f"Best Ever: {best_ever:.1f}/100")
-    
-    if best_fitness < target_fitness:
-        print(f"\n⚠️  Target not reached. Best fitness: {best_fitness:.1f}/100 < {target_fitness}/100")
-    
     print("=" * 100)
     
-    # Test final approfondi du meilleur génome
-    print("\n" + "="*50)
-    print("FINAL TEST - 100 episodes")
-    print("="*50)
-    
+    # Test final
+    print("\nFINAL TEST - 200 episodes")
     best_genome = population[fitness_score.index(best_fitness)]
     env = gym.make('FrozenLake-v1', is_slippery=True)
     
     final_successes = 0
-    final_fitnesses = []
     final_steps = []
-    final_impossible = []
     
-    for _ in range(100):
-        reached_goal, steps, impossible_actions = run_episode(best_genome, env)
-        fitness = calculate_fitness(reached_goal, steps, impossible_actions)
-        final_fitnesses.append(fitness)
-        
+    for _ in range(200):
+        reached_goal, steps, _, _ = run_episode(best_genome, env)
         if reached_goal:
             final_successes += 1
             final_steps.append(steps)
-        final_impossible.append(impossible_actions)
     
     env.close()
     
-    avg_fitness = sum(final_fitnesses) / len(final_fitnesses)
-    avg_impossible = sum(final_impossible) / len(final_impossible)
-    
-    print(f"Success Rate: {final_successes}/100 ({100*final_successes/100:.1f}%)")
-    print(f"Average Fitness: {avg_fitness:.1f}/100")
-    print(f"Average Impossible Actions: {avg_impossible:.2f}")
+    print(f"Success Rate: {final_successes}/200 ({100*final_successes/200:.1f}%)")
     if final_steps:
-        avg_steps = sum(final_steps) / len(final_steps)
-        print(f"Average steps (successful episodes): {avg_steps:.1f}")
+        print(f"Avg steps (successes): {sum(final_steps)/len(final_steps):.1f}")
         print(f"Steps range: {min(final_steps)} - {max(final_steps)}")
-        print(f"Optimal steps: 6")
     
-    # Visualiser le meilleur genome
     try:
         plot_genome(best_genome)
     except:
-        print("\nNote: Genome visualization not available")
+        pass
