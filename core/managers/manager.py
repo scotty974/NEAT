@@ -4,7 +4,7 @@ import random
 from core.Genome.genome import Genome
 from core.Species.speciator import Speciator
 from utils.crossover import crossover
-
+from utils.vis import plot_genome
 
 class Manager:
     def __init__(self, nb_inputs, nb_outputs, innov: InovationsTracker):
@@ -44,6 +44,11 @@ class Manager:
         ]
 
     def create_genome_initial(self):
+        # Réinitialiser les listes pour chaque nouveau génome
+        self.inputs_node = []
+        self.outputs_node = []
+        self.connections = []
+        
         for i in range(self.nb_inputs):
             node = NodeGene(
                 i,
@@ -71,12 +76,19 @@ class Manager:
             for j in range(self.nb_outputs):
                 in_node_id = i
                 out_node_id = self.nb_inputs + j
+                
+                # Vérifier qu'on ne crée pas d'auto-connexion
+                if in_node_id == out_node_id:
+                    continue
+                
                 innov_num = self.innov.get_connection_innovation(
                     in_node_id, out_node_id
                 )
                 weight = random.uniform(-1, 1)
+                # CORRECTION: Ordre correct des paramètres
+                # ConnectionGene(in_node_id, out_node_id, weight, innov, enabled=True)
                 conn = ConnectionGene(
-                    innov_num, in_node_id, out_node_id, weight, innov_num
+                    in_node_id, out_node_id, weight, innov_num, True
                 )
                 self.connections.append(conn)
 
@@ -163,11 +175,13 @@ class Manager:
 
         for species in species_list:
             if species.members:
-                best_genome = sorted(
+                best_genomes = sorted(
                     species.members, key=lambda g: g.fitness, reverse=True
                 )
-                n_elite = max(1, int(len(best_genome) * 0.2))
-                new_population.extend(best_genome[:n_elite])
+                n_elite = max(1, int(len(best_genomes) * 0.2))
+                # CORRECTION: Copier les élites au lieu de réutiliser les mêmes objets
+                for elite in best_genomes[:n_elite]:
+                    new_population.append(elite.copy())
 
         remaining_offspring = len(population) - len(new_population)
 
