@@ -175,11 +175,13 @@ class Manager:
 
         for species in species_list:
             if species.members:
-                best_genome = sorted(
+                best_genomes = sorted(
                     species.members, key=lambda g: g.fitness, reverse=True
                 )
-                n_elite = max(1, int(len(best_genome) * 0.2))
-                new_population.extend(best_genome[:n_elite])
+                n_elite = max(1, int(len(best_genomes) * 0.2))
+                # CORRECTION: Copier les élites au lieu de réutiliser les mêmes objets
+                for elite in best_genomes[:n_elite]:
+                    new_population.append(elite.copy())
 
         remaining_offspring = len(population) - len(new_population)
 

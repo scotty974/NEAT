@@ -9,7 +9,8 @@ import warnings
 
 class Genome:
     def __init__(self, nodes, connections):
-        self.nodes = {nodes.id: nodes for nodes in nodes if nodes is not None}
+        # CORRECTION: Utiliser 'node' (singulier) pour la variable d'itération
+        self.nodes = {node.id: node for node in nodes if node is not None}
         self.connections = [c for c in connections]
         self.fitness = 0
 
@@ -75,9 +76,13 @@ class Genome:
             else:
                 activation_func = node.activation
 
-            weighted_inputs = [
-                conn.weight * node_values[conn.in_node_id] for conn in incoming
-            ]
+            # CORRECTION: Vérifier que les nœuds d'entrée ont été évalués
+            weighted_inputs = []
+            for conn in incoming:
+                if conn.in_node_id in node_values:
+                    weighted_inputs.append(conn.weight * node_values[conn.in_node_id])
+                else:
+                    print(f"WARNING: Node {conn.in_node_id} not evaluated yet for connection to {node_id}!")
 
             if weighted_inputs:
                 aggregated_value = aggregation_func(weighted_inputs)
