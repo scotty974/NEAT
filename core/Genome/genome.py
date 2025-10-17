@@ -9,7 +9,6 @@ import warnings
 
 class Genome:
     def __init__(self, nodes, connections):
-        print("nodes: ", nodes)
         self.nodes = {nodes.id: nodes for nodes in nodes if nodes is not None}
         self.connections = [c for c in connections]
         self.fitness = 0
@@ -112,7 +111,10 @@ class Genome:
             )
             node2 = random.choice([node for node in node_list if node.layer != "input"])
 
-            if node1 == node2:
+            if node1.id == node2.id:
+                continue
+
+            if node1.layer == "output" or node2.layer == "input":
                 continue
 
             if self.check_connection(node1, node2):
